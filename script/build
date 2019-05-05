@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+USERNAME=volgactf
+IMAGE=volgactf-final-devenv-master
+docker build -t $USERNAME/$IMAGE:latest .
