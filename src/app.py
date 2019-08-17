@@ -21,6 +21,8 @@ app.register_blueprint(sse, url_prefix='/stream')
 
 cache = redis.Redis(host='redis', port=6379, db=1)
 
+KEY_LOGS = 'volgactf_final_logs'
+KEY_FLAGS = 'volgactf_final_flags'
 
 @app.route('/')
 def index():
@@ -29,7 +31,7 @@ def index():
 
 def issue_flag():
     secret = base64.urlsafe_b64decode(
-        os.getenv('THEMIS_FINALS_FLAG_GENERATOR_SECRET')
+        os.getenv('VOLGACTF_FINAL_FLAG_GENERATOR_SECRET')
     )
     h = hashlib.md5()
     h.update(os.urandom(32))
@@ -40,15 +42,15 @@ def issue_flag():
 
 
 def create_capsule(flag):
-    key = os.getenv('THEMIS_FINALS_FLAG_SIGN_KEY_PRIVATE').replace('\\n', '\n')
+    key = os.getenv('VOLGACTF_FINAL_FLAG_SIGN_KEY_PRIVATE').replace('\\n', '\n')
     return '{0}{1}{2}'.format(
-        os.getenv('THEMIS_FINALS_FLAG_WRAP_PREFIX'),
+        os.getenv('VOLGACTF_FINAL_FLAG_WRAP_PREFIX'),
         jwt.encode(
             {'flag': flag},
             key=key,
             algorithm='ES256'
         ).decode('ascii'),
-        os.getenv('THEMIS_FINALS_FLAG_WRAP_SUFFIX')
+        os.getenv('VOLGACTF_FINAL_FLAG_WRAP_SUFFIX')
     )
 
 
@@ -92,8 +94,8 @@ def push():
     flag, label = issue_flag()
     capsule = create_capsule(flag)
     job = create_push_job(capsule, label, request.form)
-    auth = (os.getenv('THEMIS_FINALS_AUTH_CHECKER_USERNAME'),
-            os.getenv('THEMIS_FINALS_AUTH_CHECKER_PASSWORD'))
+    auth = (os.getenv('VOLGACTF_FINAL_AUTH_CHECKER_USERNAME'),
+            os.getenv('VOLGACTF_FINAL_AUTH_CHECKER_PASSWORD'))
     checker_host = request.form.get('checker', 'checker')
     url = 'http://{0}/push'.format(checker_host)
     r = requests.post(url, json=job, auth=auth)
@@ -130,8 +132,8 @@ def pull():
         app.logger.info(x['flag'])
     item = [x for x in flags if x['flag'] == flag][0]
     job = create_pull_job(item['capsule'], item['label'], item['params'])
-    auth = (os.getenv('THEMIS_FINALS_AUTH_CHECKER_USERNAME'),
-            os.getenv('THEMIS_FINALS_AUTH_CHECKER_PASSWORD'))
+    auth = (os.getenv('VOLGACTF_FINAL_AUTH_CHECKER_USERNAME'),
+            os.getenv('VOLGACTF_FINAL_AUTH_CHECKER_PASSWORD'))
     checker_host = item['checker_host']
     url = 'http://{0}/pull'.format(checker_host)
     r = requests.post(url, json=job, auth=auth)
@@ -146,14 +148,14 @@ def pull():
 
 
 def get_logs():
-    logs_str = cache.get('themis_finals_logs')
+    logs_str = cache.get(KEY_LOGS)
     if logs_str is None:
         return list()
     return json.loads(logs_str.decode('utf-8'))
 
 
 def get_flags():
-    flags_str = cache.get('themis_finals_flags')
+    flags_str = cache.get(KEY_FLAGS)
     if flags_str is None:
         return list()
     return json.loads(flags_str.decode('utf-8'))
@@ -162,13 +164,13 @@ def get_flags():
 def update_logs(item):
     logs = deque(get_logs(), 25)
     logs.appendleft(item)
-    cache.set('themis_finals_logs', json.dumps(list(logs)))
+    cache.set(KEY_LOGS, json.dumps(list(logs)))
 
 
 def update_flags(item):
     flags = deque(get_flags(), 25)
     flags.appendleft(item)
-    cache.set('themis_finals_flags', json.dumps(list(flags)))
+    cache.set(KEY_FLAGS, json.dumps(list(flags)))
 
 
 @app.route('/logs')
@@ -179,7 +181,7 @@ def logs():
 
 @app.route('/logs', methods=['DELETE'])
 def clear_logs():
-    cache.delete('themis_finals_logs')
+    cache.delete(KEY_LOGS)
     sse.publish(get_logs(), type='logs')
     return '', 204
 
@@ -192,7 +194,7 @@ def flags():
 
 @app.route('/flags', methods=['DELETE'])
 def clear_flags():
-    cache.delete('themis_finals_flags')
+    cache.delete(KEY_FLAGS)
     sse.publish(get_flags(), type='flags')
     return '', 204
 
@@ -202,7 +204,7 @@ def edit_flags(flag, label, status):
     item = [x for x in flags if x['flag'] == flag][0]
     item['status'] = status
     item['label'] = label
-    cache.set('themis_finals_flags', json.dumps(flags))
+    cache.set(KEY_FLAGS, json.dumps(flags))
 
 
 @app.route('/api/checker/v2/report_push', methods=['POST'])
@@ -232,3 +234,9 @@ def report_pull():
     ))
     sse.publish(get_logs(), type='logs')
     return '', 204
+
+
+@app.route('/api/capsule/v1/public_key', methods=['GET'])
+def get_public_key():
+    key = os.getenv('VOLGACTF_FINAL_FLAG_SIGN_KEY_PUBLIC').replace('\\n', '\n')
+    return key, 200, { 'Content-Type': 'text/plain' }
