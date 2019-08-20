@@ -13,20 +13,49 @@ from collections import deque
 from random import randrange
 from random import choice
 from string import ascii_letters, digits
+import gevent
+from time import mktime
+from datetime import datetime, timedelta
 
 
 app = Flask(__name__)
 app.config['REDIS_URL'] = 'redis://redis:6379/2'
+app.config['TEMPLATES_AUTO_RELOAD'] = os.getenv('SERVER_RELOAD', 'no') == 'yes'
 app.register_blueprint(sse, url_prefix='/stream')
 
 cache = redis.Redis(host='redis', port=6379, db=1)
 
 KEY_LOGS = 'volgactf_final_logs'
 KEY_FLAGS = 'volgactf_final_flags'
+KEY_STATE = 'volgactf_final_state'
+
+LOG_HISTORY = int(os.getenv('LOG_HISTORY', '100'))
+FLAG_HISTORY = int(os.getenv('FLAG_HISTORY', '20'))
+
+import random
+
+SERVICE_NAMES = [
+    'Jinn the Ripper',
+    'MangoDB'
+]
+
+def get_form_defaults():
+    return {
+        'checker_host': os.getenv('DEFAULT_CHECKER_HOST', 'checker'),
+        'team_host': os.getenv('DEFAULT_TEAM_HOST', 'service'),
+        'team_name': os.getenv('DEFAULT_TEAM_NAME', 'TEAM'),
+        'service_name': os.getenv('DEFAULT_SERVICE_NAME', 'SERVICE'),
+        'round': int(os.getenv('DEFAULT_ROUND', '1')),
+        'flag_lifetime': int(os.getenv('DEFAULT_FLAG_LIFETIME', '360')),
+        'round_timespan': int(os.getenv('DEFAULT_ROUND_TIMESPAN', '120')),
+        'poll_timespan': int(os.getenv('DEFAULT_POLL_TIMESPAN', '35')),
+        'poll_delay': int(os.getenv('DEFAULT_POLL_DELAY', '40'))
+    }
+
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template('index.html', form_defaults=get_form_defaults())
 
 
 def issue_flag():
@@ -57,15 +86,15 @@ def create_capsule(flag):
 def create_push_job(capsule, label, params):
     return {
         'params': {
-            'endpoint': params.get('endpoint', '127.0.0.1'),
+            'endpoint': params['team_host'],
             'capsule': capsule,
             'label': label
         },
         'metadata': {
-            'timestamp': datetime.datetime.now(pytz.utc).isoformat(),
-            'round': int(params.get('round', '1')),
-            'team_name': params.get('team', 'Team'),
-            'service_name': params.get('service', 'Service')
+            'timestamp': datetime.now(pytz.utc).isoformat(),
+            'round': params['round'],
+            'team_name': params['team_name'],
+            'service_name': params['service_name']
         },
         'report_url': 'http://master/api/checker/v2/report_push'
     }
@@ -75,151 +104,281 @@ def create_pull_job(capsule, label, params):
     return {
         'params': {
             'request_id': randrange(1, 100),
-            'endpoint': params['endpoint'],
+            'endpoint': params['team_host'],
             'capsule': capsule,
             'label': label
         },
         'metadata': {
-            'timestamp': datetime.datetime.now(pytz.utc).isoformat(),
+            'timestamp': datetime.now(pytz.utc).isoformat(),
             'round': params['round'],
-            'team_name': params['team'],
-            'service_name': params['service']
+            'team_name': params['team_name'],
+            'service_name': params['service_name']
         },
         'report_url': 'http://master/api/checker/v2/report_pull'
     }
 
 
-@app.route('/push', methods=['POST'])
-def push():
+def schedule(delay, func, *args, **kw_args):
+    state = fetch_state()
+    if state['mode'] != 'recurring':
+        return
+    gevent.spawn_later(0, func, *args, **kw_args)
+    gevent.spawn_later(delay, schedule, delay, func, *args, **kw_args)
+
+
+def parse_settings_form(form):
+    defaults = get_form_defaults()
+    return {
+        'checker_host': form.get('checker_host', defaults['checker_host']),
+        'team_host': form.get('team_host', defaults['team_host']),
+        'team_name': form.get('team_name', defaults['team_name']),
+        'service_name': form.get('service_name', defaults['service_name'])
+    }
+
+
+def parse_onetime_form(form):
+    defaults = get_form_defaults()
+    r = parse_settings_form(form)
+    r.update({
+        'round': int(form.get('round', str(defaults['round'])))
+    })
+    return r
+
+
+def parse_recurring_form(form):
+    defaults = get_form_defaults()
+    r = parse_settings_form(form)
+    r.update({
+        'round': 0,
+        'flag_lifetime': int(form.get('flag_lifetime', str(defaults['flag_lifetime']))),
+        'round_timespan': int(form.get('round_timespan', str(defaults['round_timespan']))),
+        'poll_timespan': int(form.get('poll_timespan', str(defaults['poll_timespan']))),
+        'poll_delay': int(form.get('poll_delay', str(defaults['poll_delay'])))
+    })
+    return r
+
+
+def internal_push(params):
     flag, label = issue_flag()
     capsule = create_capsule(flag)
-    job = create_push_job(capsule, label, request.form)
+    job = create_push_job(capsule, label, params)
     auth = (os.getenv('VOLGACTF_FINAL_AUTH_CHECKER_USERNAME'),
             os.getenv('VOLGACTF_FINAL_AUTH_CHECKER_PASSWORD'))
-    checker_host = request.form.get('checker', 'checker')
-    url = 'http://{0}/push'.format(checker_host)
+    url = 'http://{0}/push'.format(params['checker_host'])
     r = requests.post(url, json=job, auth=auth)
     update_logs(dict(
-        type='outcoming',
+        type='egress',
         category='PUSH',
-        timestamp=datetime.datetime.now(pytz.utc).isoformat(),
+        timestamp=datetime.now(pytz.utc).isoformat(),
         raw=job
     ))
-    sse.publish(get_logs(), type='logs')
+    sse.publish(fetch_logs(), type='logs')
     update_flags(dict(
-        checker_host=checker_host,
+        checker_host=params['checker_host'],
         flag=flag,
         status=-1,
         capsule=capsule,
         label=label,
         params=dict(
-            endpoint=request.form.get('endpoint', '127.0.0.1'),
-            round=int(request.form.get('round', '1')),
-            team=request.form.get('team', 'Team'),
-            service=request.form.get('service', 'Service')
+            team_host=params['team_host'],
+            round=params['round'],
+            team_name=params['team_name'],
+            service_name=params['service_name']
         )
     ))
-    sse.publish(get_flags(), type='flags')
-    return jsonify(job), r.status_code
+    sse.publish(fetch_flags(), type='flags')
+    return job, r.status_code
+
+
+@app.route('/onetime_push', methods=['POST'])
+def onetime_push():
+    params = parse_onetime_form(request.form)
+    job, status_code = internal_push(params)
+    return jsonify(job), status_code
+
+
+def scheduled_push():
+    with app.app_context():
+        state = fetch_state()
+        if state['mode'] != 'recurring':
+            return
+        time_pos = state['params']['poll_delay']
+        while time_pos < state['params']['round_timespan']:
+            gevent.spawn_later(time_pos, scheduled_pull)
+            time_pos += state['params']['poll_timespan']
+        state['params']['round'] += 1
+        update_state(state)
+        sse.publish(fetch_state(), type='state')
+        internal_push(state['params'])
+
+
+def scheduled_pull():
+    with app.app_context():
+        state = fetch_state()
+        if state['mode'] != 'recurring':
+            return
+        now = datetime.now(pytz.utc)
+        items = [x for x in fetch_flags() if x['status'] == 101 and datetime.fromisoformat(x['expires']) > now]
+        if len(items):
+            internal_pull(random.choice(items)['flag'])
+
+
+@app.before_first_request
+def init_schedule():
+    state = fetch_state()
+    if state['mode'] == 'recurring':
+        schedule(state['params']['round_timespan'], scheduled_push)
+
+
+@app.route('/recurring', methods=['POST'])
+def recurring_start():
+    state = fetch_state()
+    if state['mode'] == 'recurring':
+        return '', 400
+    params = parse_recurring_form(request.form)
+    update_state({
+        'mode': 'recurring',
+        'params': params
+    })
+    sse.publish(fetch_state(), type='state')
+    schedule(params['round_timespan'], scheduled_push)
+    return jsonify({}), 202
+
+
+@app.route('/recurring', methods=['DELETE'])
+def recurring_stop():
+    update_state({
+        'mode': 'onetime'
+    })
+    sse.publish(fetch_state(), type='state')
+    return jsonify({}), 202
+
+
+def internal_pull(flag):
+    with app.app_context():
+        flags = fetch_flags()
+        item = [x for x in flags if x['flag'] == flag][0]
+        job = create_pull_job(item['capsule'], item['label'], item['params'])
+        auth = (os.getenv('VOLGACTF_FINAL_AUTH_CHECKER_USERNAME'),
+                os.getenv('VOLGACTF_FINAL_AUTH_CHECKER_PASSWORD'))
+        checker_host = item['checker_host']
+        url = 'http://{0}/pull'.format(checker_host)
+        r = requests.post(url, json=job, auth=auth)
+        update_logs(dict(
+            type='egress',
+            category='PULL',
+            timestamp=datetime.now(pytz.utc).isoformat(),
+            raw=job
+        ))
+        sse.publish(fetch_logs(), type='logs')
+        return job, r.status_code
 
 
 @app.route('/pull', methods=['POST'])
 def pull():
     flag = request.form.get('flag')
-    app.logger.info(flag)
-    flags = get_flags()
-    for x in flags:
-        app.logger.info(x['flag'])
-    item = [x for x in flags if x['flag'] == flag][0]
-    job = create_pull_job(item['capsule'], item['label'], item['params'])
-    auth = (os.getenv('VOLGACTF_FINAL_AUTH_CHECKER_USERNAME'),
-            os.getenv('VOLGACTF_FINAL_AUTH_CHECKER_PASSWORD'))
-    checker_host = item['checker_host']
-    url = 'http://{0}/pull'.format(checker_host)
-    r = requests.post(url, json=job, auth=auth)
-    update_logs(dict(
-        type='outcoming',
-        category='PULL',
-        timestamp=datetime.datetime.now(pytz.utc).isoformat(),
-        raw=job
-    ))
-    sse.publish(get_logs(), type='logs')
-    return jsonify(job), r.status_code
+    job, status_code = internal_pull(flag)
+    return jsonify(job), status_code
 
 
-def get_logs():
+def fetch_logs():
     logs_str = cache.get(KEY_LOGS)
     if logs_str is None:
         return list()
     return json.loads(logs_str.decode('utf-8'))
 
 
-def get_flags():
+def fetch_flags():
     flags_str = cache.get(KEY_FLAGS)
     if flags_str is None:
         return list()
     return json.loads(flags_str.decode('utf-8'))
 
 
+def fetch_state():
+    state_str = cache.get(KEY_STATE)
+    if state_str is None:
+        return { 'mode': 'onetime' }
+    return json.loads(state_str.decode('utf-8'))
+
+
 def update_logs(item):
-    logs = deque(get_logs(), 25)
+    logs = deque(fetch_logs(), LOG_HISTORY)
     logs.appendleft(item)
     cache.set(KEY_LOGS, json.dumps(list(logs)))
 
 
 def update_flags(item):
-    flags = deque(get_flags(), 25)
+    flags = deque(fetch_flags(), FLAG_HISTORY)
     flags.appendleft(item)
     cache.set(KEY_FLAGS, json.dumps(list(flags)))
 
 
 @app.route('/logs')
-def logs():
-    logs = get_logs()
+def get_logs():
+    logs = fetch_logs()
     return jsonify(logs)
 
 
 @app.route('/logs', methods=['DELETE'])
 def clear_logs():
     cache.delete(KEY_LOGS)
-    sse.publish(get_logs(), type='logs')
+    sse.publish(fetch_logs(), type='logs')
     return '', 204
 
 
 @app.route('/flags')
-def flags():
-    flags = get_flags()
+def get_flags():
+    flags = fetch_flags()
     return jsonify(flags)
 
 
 @app.route('/flags', methods=['DELETE'])
 def clear_flags():
     cache.delete(KEY_FLAGS)
-    sse.publish(get_flags(), type='flags')
+    sse.publish(fetch_flags(), type='flags')
     return '', 204
 
 
-def edit_flags(flag, label, status):
-    flags = get_flags()
+def edit_flags(flag, label, status, lifetime):
+    flags = fetch_flags()
     item = [x for x in flags if x['flag'] == flag][0]
     item['status'] = status
     item['label'] = label
+    expires = datetime.now(pytz.utc) + timedelta(seconds=lifetime)
+    item['expires'] = expires.isoformat()
     cache.set(KEY_FLAGS, json.dumps(flags))
+
+
+@app.route('/state')
+def get_state():
+    state = fetch_state()
+    return jsonify(state)
+
+
+def update_state(state):
+    cache.set(KEY_STATE, json.dumps(state))
 
 
 @app.route('/api/checker/v2/report_push', methods=['POST'])
 def report_push():
     data = request.get_json()
     update_logs(dict(
-        type='incoming',
+        type='ingress',
         category='PUSH',
-        timestamp=datetime.datetime.now(pytz.utc).isoformat(),
+        timestamp=datetime.now(pytz.utc).isoformat(),
         raw=data
     ))
-    sse.publish(get_logs(), type='logs')
+    sse.publish(fetch_logs(), type='logs')
     if data['status'] == 101:
-        edit_flags(data['flag'], data['label'], data['status'])
-        sse.publish(get_flags(), type='flags')
+        lifetime = 0
+        state = fetch_state()
+        if state['mode'] == 'recurring':
+            lifetime = state['params']['flag_lifetime']
+        edit_flags(data['flag'], data['label'], data['status'], lifetime)
+        sse.publish(fetch_flags(), type='flags')
+        if state['mode'] == 'recurring':
+            gevent.spawn(internal_pull, data['flag'])
     return '', 204
 
 
@@ -227,12 +386,12 @@ def report_push():
 def report_pull():
     data = request.get_json()
     update_logs(dict(
-        type='incoming',
+        type='ingress',
         category='PULL',
-        timestamp=datetime.datetime.now(pytz.utc).isoformat(),
+        timestamp=datetime.now(pytz.utc).isoformat(),
         raw=data
     ))
-    sse.publish(get_logs(), type='logs')
+    sse.publish(fetch_logs(), type='logs')
     return '', 204
 
 

@@ -5,5 +5,4 @@ PyJWT
 cryptography
 pytz
 flask-sse
-gunicorn
 gevent

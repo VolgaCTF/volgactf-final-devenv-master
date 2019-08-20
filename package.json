@@ -1,0 +1,23 @@
+{
+  "name": "volgactf-final-devenv-master",
+  "version": "1.0.0",
+  "description": "[VolgaCTF Final devenv](https://github.com/VolgaCTF/volgactf-final-devenv) is a platform to develop & test an A/D CTF service and its checker.",
+  "main": "index.js",
+  "scripts": {
+    "build": "cp node_modules/bootstrap/dist/css/bootstrap.min.css src/static"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VolgaCTF/volgactf-final-devenv-master.git"
+  },
+  "author": "VolgaCTF",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/VolgaCTF/volgactf-final-devenv-master/issues"
+  },
+  "homepage": "https://github.com/VolgaCTF/volgactf-final-devenv-master#readme",
+  "dependencies": {
+    "bootstrap": "^4.3.1",
+    "jquery": "^3.4.1"
+  }
+}
