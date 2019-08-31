@@ -65,7 +65,7 @@ def issue_flag():
     h = hashlib.md5()
     h.update(os.urandom(32))
     h.update(secret)
-    flag = h.hexdigest()
+    flag = h.hexdigest() + '='
     label = ''.join(choice(ascii_letters + digits) for _ in range(8))
     return flag, label
 
