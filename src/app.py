@@ -9,7 +9,6 @@ import requests
 import pytz
 import json
 from flask_sse import sse
-from collections import deque
 from random import randrange
 from random import choice
 from string import ascii_letters, digits
@@ -29,15 +28,8 @@ KEY_LOGS = 'volgactf_final_logs'
 KEY_FLAGS = 'volgactf_final_flags'
 KEY_STATE = 'volgactf_final_state'
 
-LOG_HISTORY = int(os.getenv('LOG_HISTORY', '100'))
-FLAG_HISTORY = int(os.getenv('FLAG_HISTORY', '20'))
-
-import random
-
-SERVICE_NAMES = [
-    'Jinn the Ripper',
-    'MangoDB'
-]
+LOG_HISTORY = int(os.getenv('LOG_HISTORY', '150'))
+FLAG_HISTORY = int(os.getenv('FLAG_HISTORY', '25'))
 
 def get_form_defaults():
     return {
@@ -220,7 +212,7 @@ def scheduled_pull():
         now = datetime.now(pytz.utc)
         items = [x for x in fetch_flags() if x['status'] == 101 and datetime.fromisoformat(x['expires']) > now]
         if len(items):
-            internal_pull(random.choice(items)['flag'])
+            internal_pull(choice(items)['flag'])
 
 
 @app.before_first_request
@@ -282,17 +274,15 @@ def pull():
 
 
 def fetch_logs():
-    logs_str = cache.get(KEY_LOGS)
-    if logs_str is None:
+    if cache.llen(KEY_LOGS) == 0:
         return list()
-    return json.loads(logs_str.decode('utf-8'))
+    return list(map(lambda x: json.loads(x.decode('utf-8')), cache.lrange(KEY_LOGS, 0, -1)))
 
 
 def fetch_flags():
-    flags_str = cache.get(KEY_FLAGS)
-    if flags_str is None:
+    if cache.llen(KEY_FLAGS) == 0:
         return list()
-    return json.loads(flags_str.decode('utf-8'))
+    return list(map(lambda x: json.loads(x.decode('utf-8')), cache.lrange(KEY_FLAGS, 0, -1)))
 
 
 def fetch_state():
@@ -303,15 +293,13 @@ def fetch_state():
 
 
 def update_logs(item):
-    logs = deque(fetch_logs(), LOG_HISTORY)
-    logs.appendleft(item)
-    cache.set(KEY_LOGS, json.dumps(list(logs)))
+    cache.lpush(KEY_LOGS, json.dumps(item))
+    cache.ltrim(KEY_LOGS, 0, LOG_HISTORY - 1)
 
 
 def update_flags(item):
-    flags = deque(fetch_flags(), FLAG_HISTORY)
-    flags.appendleft(item)
-    cache.set(KEY_FLAGS, json.dumps(list(flags)))
+    cache.lpush(KEY_FLAGS, json.dumps(item))
+    cache.ltrim(KEY_FLAGS, 0, FLAG_HISTORY - 1)
 
 
 @app.route('/logs')
@@ -341,13 +329,14 @@ def clear_flags():
 
 
 def edit_flags(flag, label, status, lifetime):
-    flags = fetch_flags()
-    item = [x for x in flags if x['flag'] == flag][0]
-    item['status'] = status
-    item['label'] = label
-    expires = datetime.now(pytz.utc) + timedelta(seconds=lifetime)
-    item['expires'] = expires.isoformat()
-    cache.set(KEY_FLAGS, json.dumps(flags))
+    for ndx, item in enumerate(fetch_flags()):
+        if item['flag'] == flag:
+            item['status'] = status
+            item['label'] = label
+            expires = datetime.now(pytz.utc) + timedelta(seconds=lifetime)
+            item['expires'] = expires.isoformat()
+            cache.lset(KEY_FLAGS, ndx, json.dumps(item))
+            break
 
 
 @app.route('/state')
