@@ -70,7 +70,7 @@ def create_capsule(flag):
             {'flag': flag},
             key=key,
             algorithm='ES256'
-        ).decode('ascii'),
+        ),
         os.getenv('VOLGACTF_FINAL_FLAG_WRAP_SUFFIX')
     )
 
@@ -215,13 +215,6 @@ def scheduled_pull():
             internal_pull(choice(items)['flag'])
 
 
-@app.before_first_request
-def init_schedule():
-    state = fetch_state()
-    if state['mode'] == 'recurring':
-        schedule(state['params']['round_timespan'], scheduled_push)
-
-
 @app.route('/recurring', methods=['POST'])
 def recurring_start():
     state = fetch_state()
@@ -276,20 +269,20 @@ def pull():
 def fetch_logs():
     if cache.llen(KEY_LOGS) == 0:
         return list()
-    return list(map(lambda x: json.loads(x.decode('utf-8')), cache.lrange(KEY_LOGS, 0, -1)))
+    return list(map(lambda x: json.loads(x), cache.lrange(KEY_LOGS, 0, -1)))
 
 
 def fetch_flags():
     if cache.llen(KEY_FLAGS) == 0:
         return list()
-    return list(map(lambda x: json.loads(x.decode('utf-8')), cache.lrange(KEY_FLAGS, 0, -1)))
+    return list(map(lambda x: json.loads(x), cache.lrange(KEY_FLAGS, 0, -1)))
 
 
 def fetch_state():
     state_str = cache.get(KEY_STATE)
     if state_str is None:
         return { 'mode': 'onetime' }
-    return json.loads(state_str.decode('utf-8'))
+    return json.loads(state_str)
 
 
 def update_logs(item):
@@ -388,3 +381,9 @@ def report_pull():
 def get_public_key():
     key = os.getenv('VOLGACTF_FINAL_FLAG_SIGN_KEY_PUBLIC').replace('\\n', '\n')
     return key, 200, { 'Content-Type': 'text/plain' }
+
+
+with app.app_context():
+    state = fetch_state()
+    if state['mode'] == 'recurring':
+        schedule(state['params']['round_timespan'], scheduled_push)
